@@ -39,7 +39,7 @@ class ToolSpanMixin:
         get_error: Callable[[Any], str | None] | None = None,
         additional_attributes: Mapping[str, Any] | None = None,
         capture_output: bool = True,
-        on_span_started: Callable[[Span], None] | None = None,
+        on_span_succeeded: Callable[[Span], None] | None = None,
         parent_span_context: SpanContext | None = None,
     ) -> Iterator[Callable[[Any], None]]:
         attributes: dict[str, Any] = {
@@ -65,8 +65,6 @@ class ToolSpanMixin:
             attributes=attributes,
             context=context,
         ) as span:
-            if on_span_started is not None:
-                on_span_started(span)
             error: str | None = None
 
             def set_output(result: Any) -> None:
@@ -81,3 +79,5 @@ class ToolSpanMixin:
                 span.set_status(Status(StatusCode.ERROR, error))
             else:
                 span.set_status(Status(StatusCode.OK))
+                if on_span_succeeded is not None:
+                    on_span_succeeded(span)

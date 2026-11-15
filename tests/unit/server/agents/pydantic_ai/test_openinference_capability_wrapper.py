@@ -486,14 +486,13 @@ async def test_skill_load_reference_and_downstream_spans_are_linked(
             description=tool_name,
             parameters_json_schema={
                 "type": "object",
-                "properties": {
-                    key: {"type": "string"} for key in args
-                },
+                "properties": {key: {"type": "string"} for key in args},
                 "required": list(args),
                 "additionalProperties": False,
             },
         )
         call = ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id)
+
         async def _handler(_: dict[str, Any]) -> str:
             return "ok"
 
@@ -519,8 +518,69 @@ async def test_skill_load_reference_and_downstream_spans_are_linked(
     downstream_span = spans["downstream"]
     assert reference_span.parent is not None
     assert reference_span.parent.span_id == load_span.context.span_id
-    assert dict(reference_span.attributes or {})["phoenix.skill.applied"] is True
-    assert dict(downstream_span.attributes or {})["phoenix.skill.applied"] is True
+    assert dict(reference_span.attributes or {})["phoenix.skill.association"] == "resource_read"
+    assert dict(downstream_span.attributes or {})["phoenix.skill.association"] == "loaded_context"
+
+
+@pytest.mark.parametrize("raises", [True, False])
+async def test_failed_skill_load_does_not_link_later_tools(
+    tmp_path: Path,
+    in_memory_span_exporter: InMemorySpanExporter,
+    tracer: OITracer,
+    raises: bool,
+) -> None:
+    skill = Skill(name="demo", description="Demo", summary="Demo", text="Private", path=tmp_path)
+
+    @dataclass
+    class Dependencies:
+        skill_trace_state: SkillTraceState
+
+    deps = Dependencies(skill_trace_state=SkillTraceState())
+    wrapper = OpenInferenceCapabilityWrapper[Dependencies](
+        wrapped=_NoOpCapability(),
+        tracer=tracer,
+        skills_by_name={skill.name: skill},
+        get_error_by_tool_name={"load_skill": lambda result: "load failed"},
+    )
+    ctx = RunContext(deps=deps, model=TestModel(), usage=RunUsage())
+
+    async def fail_load(args: dict[str, Any]) -> str:
+        assert not deps.skill_trace_state.loaded_span_ids
+        if raises:
+            raise ValueError("load failed")
+        return "load failed"
+
+    async def run_load() -> Any:
+        return await wrapper.wrap_tool_execute(
+            ctx,
+            call=ToolCallPart("load_skill", {"skill_name": "demo"}, "failed-load"),
+            tool_def=ToolDefinition(name="load_skill"),
+            args={"skill_name": "demo"},
+            handler=fail_load,
+        )
+
+    if raises:
+        with pytest.raises(ValueError, match="load failed"):
+            await run_load()
+    else:
+        await run_load()
+    assert deps.skill_trace_state == SkillTraceState()
+
+    async def succeed(args: dict[str, Any]) -> str:
+        return "ok"
+
+    await wrapper.wrap_tool_execute(
+        ctx,
+        call=ToolCallPart("downstream", {}, "next-call"),
+        tool_def=ToolDefinition(name="downstream"),
+        args={},
+        handler=succeed,
+    )
+    failed_span, downstream_span = in_memory_span_exporter.get_finished_spans()
+    assert failed_span.status.status_code == StatusCode.ERROR
+    assert OUTPUT_VALUE not in dict(failed_span.attributes or {})
+    assert "phoenix.skill.load_span_id" not in dict(downstream_span.attributes or {})
+    assert "phoenix.skill.applied" not in dict(downstream_span.attributes or {})
 
 
 # OpenInference attribute keys

@@ -21,7 +21,7 @@ SKILL_ORIGIN_ATTRIBUTE = "phoenix.skill.origin"
 SKILL_RESOURCE_PATH_ATTRIBUTE = "phoenix.skill.resource_path"
 SKILL_LOAD_SPAN_ID_ATTRIBUTE = "phoenix.skill.load_span_id"
 SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE = "phoenix.skill.load_tool_call_id"
-SKILL_APPLIED_ATTRIBUTE = "phoenix.skill.applied"
+SKILL_ASSOCIATION_ATTRIBUTE = "phoenix.skill.association"
 SKILLS_AVAILABLE_ATTRIBUTE = "phoenix.skills.available"
 
 
@@ -111,7 +111,7 @@ def get_skill_tool_trace_metadata(
         attributes[SKILL_LOAD_SPAN_ID_ATTRIBUTE] = load_span_id
     if (load_tool_call_id := state.loaded_tool_call_ids.get(skill_name)) is not None:
         attributes[SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE] = load_tool_call_id
-    attributes[SKILL_APPLIED_ATTRIBUTE] = True
+    attributes[SKILL_ASSOCIATION_ATTRIBUTE] = "resource_read"
     return SkillToolTraceMetadata(
         attributes=attributes,
         capture_output=False,
@@ -120,14 +120,14 @@ def get_skill_tool_trace_metadata(
     )
 
 
-def get_applied_skill_attributes(state: SkillTraceState) -> dict[str, Any]:
+def get_loaded_skill_attributes(state: SkillTraceState) -> dict[str, Any]:
     """Return a single unambiguous skill association for a downstream action."""
     if len(state.loaded_span_ids) != 1:
         return {}
     skill_name, load_span_id = next(iter(state.loaded_span_ids.items()))
     return {
         SKILL_NAME_ATTRIBUTE: skill_name,
-        SKILL_APPLIED_ATTRIBUTE: True,
+        SKILL_ASSOCIATION_ATTRIBUTE: "loaded_context",
         SKILL_LOAD_SPAN_ID_ATTRIBUTE: load_span_id,
         **(
             {SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE: state.loaded_tool_call_ids[skill_name]}

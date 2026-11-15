@@ -4,15 +4,15 @@ import json
 from pathlib import Path
 
 from phoenix.server.agents.skill_tracing import (
-    SKILL_APPLIED_ATTRIBUTE,
+    SKILL_ASSOCIATION_ATTRIBUTE,
     SKILL_HASH_ATTRIBUTE,
     SKILL_LOAD_SPAN_ID_ATTRIBUTE,
     SKILL_NAME_ATTRIBUTE,
     SKILL_ORIGIN_ATTRIBUTE,
     SKILL_RESOURCE_PATH_ATTRIBUTE,
     SkillTraceState,
-    get_applied_skill_attributes,
     get_available_skills_attribute,
+    get_loaded_skill_attributes,
     get_skill_metadata,
     get_skill_tool_trace_metadata,
 )
@@ -81,14 +81,14 @@ def test_skill_tool_metadata_distinguishes_load_and_resource_read(tmp_path: Path
     assert resource is not None
     assert resource.attributes[SKILL_RESOURCE_PATH_ATTRIBUTE] == "references/example.md"
     assert resource.attributes[SKILL_LOAD_SPAN_ID_ATTRIBUTE] == "span-1"
-    assert resource.attributes[SKILL_APPLIED_ATTRIBUTE] is True
+    assert resource.attributes[SKILL_ASSOCIATION_ATTRIBUTE] == "resource_read"
 
 
 def test_downstream_action_is_linked_when_one_skill_is_loaded() -> None:
-    attributes = get_applied_skill_attributes(SkillTraceState(loaded_span_ids={"demo": "span-1"}))
+    attributes = get_loaded_skill_attributes(SkillTraceState(loaded_span_ids={"demo": "span-1"}))
 
     assert attributes == {
         SKILL_NAME_ATTRIBUTE: "demo",
-        SKILL_APPLIED_ATTRIBUTE: True,
+        SKILL_ASSOCIATION_ATTRIBUTE: "loaded_context",
         SKILL_LOAD_SPAN_ID_ATTRIBUTE: "span-1",
     }

@@ -157,7 +157,7 @@ from phoenix.server.agents.skill_requests import (
     resolve_requested_skills,
 )
 from phoenix.server.agents.skill_tracing import (
-    SKILL_APPLIED_ATTRIBUTE,
+    SKILL_ASSOCIATION_ATTRIBUTE,
     SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE,
     SKILL_ORIGIN_ATTRIBUTE,
     SKILLS_AVAILABLE_ATTRIBUTE,
@@ -1322,7 +1322,7 @@ def _synthesize_client_tool_spans(
                 attributes.update(
                     {
                         **get_skill_metadata(skills_by_name[skill_name]),
-                        SKILL_APPLIED_ATTRIBUTE: True,
+                        SKILL_ASSOCIATION_ATTRIBUTE: "loaded_context",
                         SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE: load_tool_call_id,
                     }
                 )

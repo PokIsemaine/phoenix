@@ -4317,7 +4317,7 @@ async def test_chat_turn_trace_ingestion_merges_backend_spans_into_prior_turn_tr
     assert merged_trace.end_time > _PRIOR_TURN_TIME
 
 
-async def test_desktop_requested_skill_is_ingested_as_loaded_and_available(
+async def test_browser_requested_skill_is_ingested_as_loaded_and_available(
     db: DbSessionFactory,
     app: FastAPI,
     httpx_client: httpx2.AsyncClient,
@@ -4347,11 +4347,7 @@ async def test_desktop_requested_skill_is_ingested_as_loaded_and_available(
     )
 
     async with db() as session:
-        spans = (
-            await session.scalars(
-                select(models.Span)
-            )
-        ).all()
+        spans = (await session.scalars(select(models.Span))).all()
     root = next(span for span in spans if span.name == "pxi.turn")
     load = next(span for span in spans if span.name == "load_skill")
     root_skill_attributes = root.attributes["phoenix"]["skills"]

@@ -16,7 +16,7 @@ from openinference.semconv.trace import (
     SpanAttributes,
     ToolCallAttributes,
 )
-from opentelemetry.trace import Status, StatusCode, format_span_id
+from opentelemetry.trace import Span, Status, StatusCode, format_span_id
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import (
     ValidatedToolArgs,
@@ -35,7 +35,7 @@ from pydantic_ai.tools import AgentDepsT, ToolDefinition
 from phoenix.server.agents.pydantic_ai.tool_spans import ToolSpanMixin
 from phoenix.server.agents.skill_tracing import (
     SkillTraceState,
-    get_applied_skill_attributes,
+    get_loaded_skill_attributes,
     get_skill_tool_trace_metadata,
 )
 from phoenix.server.mcp.skills import Skill
@@ -59,22 +59,22 @@ class OpenInferenceCapabilityWrapper(WrapperCapability[AgentDepsT], ToolSpanMixi
         args: ValidatedToolArgs,
         handler: WrapToolExecuteHandler,
     ) -> Any:
+        skill_trace_state = getattr(ctx.deps, "skill_trace_state", None)
+        if skill_trace_state is None:
+            skill_trace_state = SkillTraceState()
         skill_trace_metadata = get_skill_tool_trace_metadata(
             tool_name=tool_def.name,
             tool_args=args,
             skills_by_name=self.skills_by_name,
-            state=(getattr(ctx.deps, "skill_trace_state", None) or SkillTraceState()),
+            state=skill_trace_state,
         )
-        skill_trace_state = getattr(ctx.deps, "skill_trace_state", None)
-        if skill_trace_state is None:
-            skill_trace_state = SkillTraceState()
         skill_trace_metadata_attributes: Mapping[str, Any]
         if skill_trace_metadata is None:
-            skill_trace_metadata_attributes = get_applied_skill_attributes(skill_trace_state)
+            skill_trace_metadata_attributes = get_loaded_skill_attributes(skill_trace_state)
         else:
             skill_trace_metadata_attributes = skill_trace_metadata.attributes
 
-        def _record_skill_load_span(span: Any) -> None:
+        def _record_skill_load_span(span: Span) -> None:
             if skill_trace_metadata is None or not skill_trace_metadata.is_load:
                 return
             if skill_trace_metadata.skill_name is None:
@@ -98,7 +98,7 @@ class OpenInferenceCapabilityWrapper(WrapperCapability[AgentDepsT], ToolSpanMixi
             capture_output=(
                 skill_trace_metadata.capture_output if skill_trace_metadata is not None else True
             ),
-            on_span_started=_record_skill_load_span,
+            on_span_succeeded=_record_skill_load_span,
             parent_span_context=(
                 skill_trace_metadata.parent_span_context
                 if skill_trace_metadata is not None
