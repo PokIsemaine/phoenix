@@ -74,10 +74,9 @@ codex.mcp.skills  AGENT
 - Reading a reference is `association=resource_read`; a tool following one loaded
   skill in the Phoenix assistant is `association=loaded_context`. Neither proves
   the model applied the instructions, so neither emits `applied=true`.
-- This adapter observes skills loaded through its MCP tools. Direct native Codex
-  filesystem skill reads are not captured. Recent upstream Codex versions document
-  a `codex.skill_invocation` OTel log event; converting that event is a separate
-  integration, not implemented or claimed verified by this example.
+- This adapter observes skills loaded through its MCP tools. For direct native
+  Codex filesystem skills, run the separate [native skill bridge](NATIVE_SKILLS.md).
+  It converts `codex.skill_invocation` OTel logs without requiring edits to skills.
 
 ## Validation evidence
 
@@ -89,3 +88,6 @@ that raised and returned load errors do not mark a skill as loaded.
 The real CLI test additionally uses a running Phoenix server and the REST
 verifier above. Keep Desktop runtime validation separate from Phoenix browser
 assistant/router tests, which exercise a different product surface.
+
+Real CLI and Desktop MCP calls have both passed collector readback. See the
+[validation record](VALIDATION.md) for separate results for MCP and native skills.
