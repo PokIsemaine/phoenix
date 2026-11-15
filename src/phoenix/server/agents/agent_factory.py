@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
 import strawberry
@@ -53,6 +53,7 @@ from phoenix.server.agents.web_access import (
     build_web_search_capability,
 )
 from phoenix.server.api.context import Context
+from phoenix.server.mcp.skills import Skill
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -91,6 +92,7 @@ def build_agent(
     build_graphql_context: Callable[[], Context] | None = None,
     initial_bash_snapshot: bytes | None = None,
     on_bash_snapshot: Callable[[bytes], None] | None = None,
+    skills: Sequence[Skill] = (),
 ) -> Agent[AgentDependencies, AgentOutput]:
     resolved_prompts = prompts or AgentPrompts()
     is_viewer = principal.is_viewer if principal is not None else False
@@ -190,6 +192,7 @@ def build_agent(
             enable_web_access=enable_web_access,
             enable_subagents=False,
             is_subagent=True,
+            skills=skills,
         )
         capabilities.append(
             CallSubAgentCapability(
@@ -206,6 +209,7 @@ def build_agent(
         wrapped=CombinedCapability(capabilities=capabilities),
         tracer=tracer,
         get_error_by_tool_name={BASH_TOOL_NAME: get_bash_tool_error},
+        skills_by_name={skill.name: skill for skill in skills},
     )
 
     agent: Agent[AgentDependencies, AgentOutput] = Agent(

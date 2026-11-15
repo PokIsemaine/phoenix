@@ -9,6 +9,7 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Iterable,
+    Mapping,
     Sequence,
 )
 from contextlib import AbstractContextManager, aclosing, nullcontext
@@ -154,6 +155,14 @@ from phoenix.server.agents.skill_requests import (
     inject_requested_skills,
     iter_requested_skill_response_chunks,
     resolve_requested_skills,
+)
+from phoenix.server.agents.skill_tracing import (
+    SKILL_APPLIED_ATTRIBUTE,
+    SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE,
+    SKILL_ORIGIN_ATTRIBUTE,
+    SKILLS_AVAILABLE_ATTRIBUTE,
+    get_available_skills_attribute,
+    get_skill_metadata,
 )
 from phoenix.server.agents.summarization import (
     summarize_messages,
@@ -1102,11 +1111,16 @@ def _emit_turn_root_span(
     error_message: str | None,
     end_time: datetime,
     user_email: str | None,
+    available_skills: Sequence[Skill] = (),
 ) -> None:
     attributes: dict[str, str] = {
         SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.AGENT.value,
         SpanAttributes.SESSION_ID: session_id,
     }
+    if available_skills:
+        attributes[SKILLS_AVAILABLE_ATTRIBUTE] = get_available_skills_attribute(
+            tuple(available_skills)
+        )
     if input_text is not None:
         attributes[SpanAttributes.INPUT_VALUE] = input_text
         attributes[SpanAttributes.INPUT_MIME_TYPE] = "text/plain"
@@ -1141,6 +1155,56 @@ def _emit_turn_root_span(
             instrumentation_scope=_PXI_INSTRUMENTATION_SCOPE,
         )
     )
+
+
+def _emit_requested_skill_spans(
+    *,
+    tracer: Tracer,
+    turn_ids: _TurnTraceIds,
+    skills: Sequence[Skill],
+    session_id: str,
+    emitted_at: datetime,
+    tool_call_ids: Mapping[str, str] | None = None,
+) -> dict[str, tuple[int, str]]:
+    """Record slash-requested synthetic loads that never execute as model tools."""
+    span_ids: dict[str, tuple[int, str]] = {}
+    for skill in skills:
+        tool_call_id = (tool_call_ids or {}).get(skill.name) or (
+            f"requested-skill-{skill.name}-{turn_ids.trace_id:032x}"
+        )
+        span_id = (
+            int.from_bytes(
+                hashlib.sha256(f"{turn_ids.trace_id}/{tool_call_id}".encode()).digest()[:8],
+                "big",
+            )
+            or 1
+        )
+        span_ids[skill.name] = (span_id, tool_call_id)
+        attributes: dict[str, Any] = {
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.TOOL.value,
+            SpanAttributes.TOOL_NAME: "load_skill",
+            SpanAttributes.TOOL_ID: tool_call_id,
+            SpanAttributes.INPUT_VALUE: json.dumps({"skill_name": skill.name}),
+            SpanAttributes.INPUT_MIME_TYPE: "application/json",
+            SpanAttributes.SESSION_ID: session_id,
+            **get_skill_metadata(skill),
+            SKILL_ORIGIN_ATTRIBUTE: "slash_request",
+        }
+        tracer.record_readable_span(
+            build_synthetic_readable_span(
+                name="load_skill",
+                trace_id=turn_ids.trace_id,
+                span_id=span_id,
+                parent_span_id=turn_ids.root_span_id,
+                start_time=turn_ids.started_at,
+                end_time=max(turn_ids.started_at, emitted_at),
+                attributes=attributes,
+                status=Status(StatusCode.OK),
+                resource=tracer.resource,
+                instrumentation_scope=_PXI_INSTRUMENTATION_SCOPE,
+            )
+        )
+    return span_ids
 
 
 @dataclass
@@ -1180,6 +1244,7 @@ def _synthesize_client_tool_spans(
     messages: Iterable[UIMessage],
     received_at: datetime,
     session_id: str,
+    skills: Sequence[Skill] = (),
 ) -> None:
     message_list = list(messages)
     last_user_index = max(
@@ -1192,6 +1257,17 @@ def _synthesize_client_tool_spans(
         DynamicToolOutputAvailablePart,
         DynamicToolOutputErrorPart,
     )
+    skills_by_name = {skill.name: skill for skill in skills}
+    loaded_skill_calls: dict[str, str] = {}
+    for message in message_list[last_user_index + 1 :]:
+        for part in message.parts:
+            if not isinstance(part, ToolOutputAvailablePart):
+                continue
+            if part.type != "tool-load_skill" or not isinstance(part.input, dict):
+                continue
+            skill_name = part.input.get("skill_name")
+            if isinstance(skill_name, str) and skill_name in skills_by_name:
+                loaded_skill_calls[skill_name] = part.tool_call_id
     for message in message_list[last_user_index + 1 :]:
         for part in message.parts:
             if not isinstance(part, resolved_tool_types):
@@ -1241,6 +1317,15 @@ def _synthesize_client_tool_spans(
                 SpanAttributes.INPUT_MIME_TYPE: "application/json",
                 SpanAttributes.SESSION_ID: session_id,
             }
+            if tool_name != "load_skill" and len(loaded_skill_calls) == 1:
+                skill_name, load_tool_call_id = next(iter(loaded_skill_calls.items()))
+                attributes.update(
+                    {
+                        **get_skill_metadata(skills_by_name[skill_name]),
+                        SKILL_APPLIED_ATTRIBUTE: True,
+                        SKILL_LOAD_TOOL_CALL_ID_ATTRIBUTE: load_tool_call_id,
+                    }
+                )
             events: tuple[Event, ...] = ()
             if isinstance(part, (ToolOutputErrorPart, DynamicToolOutputErrorPart)):
                 attributes[SpanAttributes.OUTPUT_VALUE] = part.error_text
@@ -1314,6 +1399,7 @@ def _close_superseded_turn_trace(
     received_at: datetime,
     session_id: str,
     user_email: str | None,
+    skills: Sequence[Skill] = (),
 ) -> None:
     """Emit the deferred root span of a pending turn this request superseded.
 
@@ -1332,6 +1418,7 @@ def _close_superseded_turn_trace(
         messages=messages,
         received_at=received_at,
         session_id=session_id,
+        skills=skills,
     )
     trailing_message = messages[-1] if messages else None
     output_text = _get_assistant_text(trailing_message) if trailing_message is not None else None
@@ -3309,6 +3396,8 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
 
             agent_prompts = AgentPrompts()
             forced_skills: list[Skill] = []
+            forced_skill_tool_call_ids: dict[str, str] = {}
+            available_skills: tuple[Skill, ...] = tuple(request.app.state.agent_skills)
             continued_assistant_message = merged_transcript.continued_assistant_message
             server_message_id = (
                 continued_assistant_message.id
@@ -3351,6 +3440,7 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                 graphql_mutations_enabled=graphql_mutations_enabled,
                 enable_web_access=web_access_enabled,
                 enable_subagents=subagents_enabled,
+                skills=request.app.state.agent_skills,
                 initial_bash_snapshot=initial_bash_snapshot,
                 on_bash_snapshot=_capture_bash_snapshot,
                 publish_subagent_message_chunk=(
@@ -3367,7 +3457,6 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                     model_transcript_messages
                 )
                 if body.requested_skills:
-                    available_skills = request.app.state.agent_skills
                     forced_skills = resolve_requested_skills(
                         messages=model_transcript_messages,
                         requested_skill_names=body.requested_skills,
@@ -3380,6 +3469,17 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                             available_skills=available_skills,
                             message_factory=PhoenixUIMessage,
                         )
+                        for injected_message in model_transcript_messages:
+                            for injected_part in injected_message.parts:
+                                if not isinstance(injected_part, ToolOutputAvailablePart):
+                                    continue
+                                if injected_part.type != "tool-load_skill":
+                                    continue
+                                skill_name = injected_part.input.get("skill_name")
+                                if isinstance(skill_name, str):
+                                    forced_skill_tool_call_ids[skill_name] = (
+                                        injected_part.tool_call_id
+                                    )
             adapter: VercelAIAdapter[AgentDependencies, AgentOutput] = VercelAIAdapter(
                 agent=agent,
                 run_input=_to_pydantic_ai_request_data(body, messages=model_transcript_messages),
@@ -3400,6 +3500,25 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
             turn_ids = _resolve_turn_trace_ids(
                 continued_turn_trace_context, now=request_received_at
             )
+            requested_skill_span_ids: dict[str, tuple[int, str]] = {}
+            if tracer is not None and forced_skills:
+                requested_skill_span_ids = _emit_requested_skill_spans(
+                    tracer=tracer,
+                    turn_ids=turn_ids,
+                    skills=forced_skills,
+                    session_id=otel_session_id,
+                    emitted_at=request_received_at,
+                    tool_call_ids=forced_skill_tool_call_ids,
+                )
+            for skill_name, (span_id, tool_call_id) in requested_skill_span_ids.items():
+                deps.skill_trace_state.loaded_span_ids[skill_name] = format_span_id(span_id)
+                deps.skill_trace_state.loaded_span_contexts[skill_name] = SpanContext(
+                    trace_id=turn_ids.trace_id,
+                    span_id=span_id,
+                    is_remote=False,
+                    trace_flags=TraceFlags(TraceFlags.SAMPLED),
+                )
+                deps.skill_trace_state.loaded_tool_call_ids[skill_name] = tool_call_id
             parent_context = _turn_parent_context(turn_ids)
             resolved_turn_trace_context = (
                 TurnTraceContext(
@@ -3600,6 +3719,7 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                             messages=transcript_messages,
                             received_at=request_received_at,
                             session_id=otel_session_id,
+                            skills=available_skills,
                         )
                     if tracer is not None and superseded_turn_trace_context is not None:
                         # This new user turn superseded a pending turn whose root
@@ -3612,6 +3732,7 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                             received_at=request_received_at,
                             session_id=otel_session_id,
                             user_email=phoenix_user_email if instrument_user_id else None,
+                            skills=available_skills,
                         )
                     if session_needs_title:
                         summary_task = asyncio.create_task(_summarize_untitled_session())
@@ -3664,6 +3785,7 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                                         forced_skill_message_chunks = (
                                             iter_requested_skill_response_chunks(
                                                 skills=forced_skills,
+                                                tool_call_ids=forced_skill_tool_call_ids,
                                             )
                                         )
                                         for (
@@ -3757,6 +3879,7 @@ def create_agents_router(authentication_enabled: bool) -> APIRouter:
                                     error_message=turn_error_message,
                                     end_time=datetime.now(timezone.utc),
                                     user_email=phoenix_user_email if instrument_user_id else None,
+                                    available_skills=available_skills,
                                 )
                             tracer.tracer_provider.force_flush()
                             if record_local_traces:

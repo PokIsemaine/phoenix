@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any, TypeVar
 
 from pydantic_ai.ui.vercel_ai.response_types import (
@@ -183,6 +183,7 @@ def inject_requested_skills(
 def iter_requested_skill_response_chunks(
     *,
     skills: Sequence[Skill],
+    tool_call_ids: Mapping[str, str] | None = None,
 ) -> Iterator[BaseChunk]:
     """Yield response-stream chunks that render a forced ``load_skill`` call.
 
@@ -199,7 +200,7 @@ def iter_requested_skill_response_chunks(
             :func:`resolve_requested_skills`).
     """
     for skill in skills:
-        tool_call_id = _synthetic_tool_call_id(skill)
+        tool_call_id = (tool_call_ids or {}).get(skill.name) or _synthetic_tool_call_id(skill)
         yield StartStepChunk()
         yield ToolInputAvailableChunk(
             tool_call_id=tool_call_id,

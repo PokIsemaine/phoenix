@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -31,6 +32,8 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
 from phoenix.server.agents.pydantic_ai import OpenInferenceCapabilityWrapper
+from phoenix.server.agents.skill_tracing import SkillTraceState
+from phoenix.server.mcp.skills import Skill
 
 
 @dataclass
@@ -440,6 +443,84 @@ async def test_wrap_tool_execute_marks_span_error_when_classifier_reports_error(
     assert odd_span.status.description == "sum is odd"
     assert dict(odd_span.attributes or {})[OUTPUT_VALUE] == "5"
     assert not odd_span.events
+
+
+async def test_skill_load_reference_and_downstream_spans_are_linked(
+    tmp_path: Path,
+    in_memory_span_exporter: InMemorySpanExporter,
+    tracer: OITracer,
+) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    skill = Skill(
+        name="demo-skill",
+        description="A demo skill.",
+        summary="Demo",
+        text="---\nname: demo-skill\ndescription: A demo skill.\n---\nInstructions",
+        path=skill_dir,
+    )
+
+    @dataclass
+    class _Deps:
+        skill_trace_state: SkillTraceState
+
+    deps = _Deps(skill_trace_state=SkillTraceState())
+    wrapper = OpenInferenceCapabilityWrapper[_Deps](
+        wrapped=_NoOpCapability(),
+        tracer=tracer,
+        skills_by_name={skill.name: skill},
+    )
+
+    def _ctx(tool_call_id: str) -> RunContext[_Deps]:
+        return RunContext[_Deps](
+            deps=deps,
+            model=TestModel(),
+            usage=RunUsage(),
+            tool_call_id=tool_call_id,
+            tool_name=None,
+        )
+
+    async def _run(tool_name: str, args: dict[str, Any], tool_call_id: str) -> str:
+        tool_def = ToolDefinition(
+            name=tool_name,
+            description=tool_name,
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    key: {"type": "string"} for key in args
+                },
+                "required": list(args),
+                "additionalProperties": False,
+            },
+        )
+        call = ToolCallPart(tool_name=tool_name, args=args, tool_call_id=tool_call_id)
+        async def _handler(_: dict[str, Any]) -> str:
+            return "ok"
+
+        return await wrapper.wrap_tool_execute(
+            _ctx(tool_call_id),
+            call=call,
+            tool_def=tool_def,
+            args=args,
+            handler=_handler,
+        )
+
+    await _run("load_skill", {"skill_name": skill.name}, "load-call")
+    await _run(
+        "load_skill_reference",
+        {"skill_name": skill.name, "reference_name": "references/example.md"},
+        "reference-call",
+    )
+    await _run("downstream", {"value": "x"}, "downstream-call")
+
+    spans = {span.name: span for span in in_memory_span_exporter.get_finished_spans()}
+    load_span = spans["load_skill"]
+    reference_span = spans["load_skill_reference"]
+    downstream_span = spans["downstream"]
+    assert reference_span.parent is not None
+    assert reference_span.parent.span_id == load_span.context.span_id
+    assert dict(reference_span.attributes or {})["phoenix.skill.applied"] is True
+    assert dict(downstream_span.attributes or {})["phoenix.skill.applied"] is True
 
 
 # OpenInference attribute keys

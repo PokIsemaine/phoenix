@@ -4278,7 +4278,6 @@ async def test_chat_turn_trace_ingestion_merges_backend_spans_into_prior_turn_tr
         last_message_id=assistant_tail["id"],
     )
     assert response.status_code == 200
-
     async with db() as session:
         traces = (
             await session.scalars(
@@ -4316,6 +4315,82 @@ async def test_chat_turn_trace_ingestion_merges_backend_spans_into_prior_turn_tr
 
     assert merged_trace.start_time == _PRIOR_TURN_TIME
     assert merged_trace.end_time > _PRIOR_TURN_TIME
+
+
+async def test_desktop_requested_skill_is_ingested_as_loaded_and_available(
+    db: DbSessionFactory,
+    app: FastAPI,
+    httpx_client: httpx2.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser slash-command path preserves skill telemetry in the stored trace."""
+    await _enable_local_trace_recording(app)
+    _mock_traced_test_model(monkeypatch)
+    skill = app.state.agent_skills[0]
+    session_id = "68686868-6868-4868-8686-686868686868"
+    agent_session_id = await _create_agent_session_row(db)
+
+    response = await httpx_client.post(
+        _chat_url(agent_session_id),
+        json=_chat_body(
+            session_id,
+            _user_message("use the selected skill"),
+            recordLocalTraces=True,
+            requestedSkills=[skill.name],
+        ),
+    )
+    assert response.status_code == 200
+    streamed_load = next(
+        chunk
+        for chunk in _stream_chunks(response.text)
+        if chunk.get("type") == "tool-input-available"
+    )
+
+    async with db() as session:
+        spans = (
+            await session.scalars(
+                select(models.Span)
+            )
+        ).all()
+    root = next(span for span in spans if span.name == "pxi.turn")
+    load = next(span for span in spans if span.name == "load_skill")
+    root_skill_attributes = root.attributes["phoenix"]["skills"]
+    load_skill_attributes = load.attributes["phoenix"]["skill"]
+    assert root_skill_attributes["available"]
+    assert load_skill_attributes["name"] == skill.name
+    assert load_skill_attributes["origin"] == "slash_request"
+    assert load.parent_id == root.span_id
+    assert load.attributes["tool"]["id"] == streamed_load["toolCallId"]
+    assert "applied" not in load_skill_attributes
+    assert "load_tool_call_id" not in load_skill_attributes
+
+
+async def test_cli_headless_turn_trace_contains_available_skills(
+    db: DbSessionFactory,
+    app: FastAPI,
+    httpx_client: httpx2.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI's headless request follows the same skill catalog trace contract."""
+    await _enable_local_trace_recording(app)
+    _mock_traced_test_model(monkeypatch)
+    session_id = "69696969-6969-4969-8696-696969696969"
+    agent_session_id = await _create_agent_session_row(db)
+
+    response = await httpx_client.post(
+        _chat_url(agent_session_id),
+        json=_headless_chat_body(
+            session_id,
+            _user_message("inspect the available skills"),
+            recordLocalTraces=True,
+        ),
+    )
+    assert response.status_code == 200
+
+    async with db() as session:
+        spans = (await session.scalars(select(models.Span))).all()
+    root = next(span for span in spans if span.name == "pxi.turn")
+    assert root.attributes["phoenix"]["skills"]["available"]
 
 
 async def test_new_user_message_closes_superseded_turn_trace(
